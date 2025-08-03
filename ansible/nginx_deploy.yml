@@ -1,0 +1,25 @@
+---
+- name: Nginx Cert Clean
+  hosts: "{{ envir }}"
+  tasks:
+
+  - name: Copy local crt file to remote
+    copy:
+      src: ./certs/downloads/*.crt
+      dest: /tmp
+      directory_mode: yes
+    become: true
+
+  - name: Copy local key file to remote
+    copy:
+      src: ./certs/downloads/*.key
+      dest: /tmp
+      directory_mode: yes
+    become: true
+
+  - name: Config Check - pwsh
+    script: cert_deploy.ps1
+    args:
+      executable: /usr/bin/pwsh
+    register: pwsh_result
+    become: true

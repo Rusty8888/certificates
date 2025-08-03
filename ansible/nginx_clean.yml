@@ -1,0 +1,52 @@
+---
+- name: Nginx Cert Clean
+  hosts: "{{ envir }}"
+  tasks:
+  
+  - name: Remove Cleanup Files
+    ansible.builtin.file:
+      path: '{{ item }}'
+      state: absent
+    loop:
+      - /etc/ssl/nginx/config_clean.txt
+      - /etc/ssl/nginx/crt_clean.txt
+    become: true
+
+  - name: Run PS Script 
+    script: cert_clean.ps1
+    args:
+      executable: /usr/bin/pwsh
+    register: result
+    become: true
+  
+  - name: Delete empty cert dirs
+    ansible.builtin.command: find /etc/ssl/nginx/ -empty -type d -delete
+    become: true
+  
+  - name: Check config file exists
+    stat:
+      path: /etc/ssl/nginx/config_clean.txt
+    register: config_file
+    become: true
+
+  - name: Fetch config_clean.txt
+    ansible.builtin.fetch:
+      src: /etc/ssl/nginx/config_clean.txt
+      dest: /tmp/clean-{{ inventory_hostname }}.txt
+      flat: yes
+    become: true
+    when: config_file.stat.exists
+  
+  - name: Check crt file exists
+    stat:
+      path: /etc/ssl/nginx/crt_clean.txt
+    register: crt_file
+    become: true
+
+  - name: Fetch crt_clean.txt
+    ansible.builtin.fetch:
+      src: /etc/ssl/nginx/crt_clean.txt
+      dest: /tmp/crt-{{ inventory_hostname }}.txt
+      flat: yes
+    become: true
+    when: crt_file.stat.exists

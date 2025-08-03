@@ -1,0 +1,16 @@
+[nginx]
+az01-nginx-prod-01 ansible_host=az01-nginx-prod-01.emazure.internal
+az01-nginx-prod-02 ansible_host=az01-nginx-prod-02.emazure.internal
+az02-nginx-uat-01 ansible_host=az02-nginx-uat-01.emazure.internal
+az02-nginx-uat-02 ansible_host=az02-nginx-uat-02.emazure.internal
+
+[uat]
+az02-nginx-uat-01
+az02-nginx-uat-02
+
+[prod]
+az01-nginx-prod-01
+az01-nginx-prod-02
+
+[nginx:vars]
+ansible_user=emadmin

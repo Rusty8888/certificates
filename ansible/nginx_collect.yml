@@ -1,0 +1,25 @@
+---
+- name: Nginx Cert Collect
+  hosts: "{{ envir }}"
+  tasks:
+
+  - name: Run PS Script 
+    script: nginx_configs.ps1
+    args:
+      executable: /usr/bin/pwsh
+    register: result
+    become: true
+
+  - name: Check config file exists
+    stat:
+      path: /etc/ssl/nginx/config_collect.json
+    register: config_collect
+    become: true
+
+  - name: Fetch config_clean.txt
+    ansible.builtin.fetch:
+      src: /etc/ssl/nginx/config_collect.json
+      dest: ../certs/downloads/config_collect-{{ inventory_hostname }}.json
+      flat: yes
+    become: true
+    when: config_collect.stat.exists
