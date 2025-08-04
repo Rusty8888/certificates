@@ -1,0 +1,90 @@
+name: Download Cert
+on:
+  workflow_dispatch:
+    inputs:
+      cert_name:
+        description: 'Cert Name'
+        required: true
+        type: string
+      cert_pwd:
+        description: 'Cert Password'
+        required: true
+        type: string
+      win_2016:
+        description: 'Windows Server 2016'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  retrieve_cert:
+    runs-on:
+      group: ghr-ubuntu-lts
+    env:
+      CERT_NAME: ${{ inputs.cert_name }}
+      CERT_PWD: ${{ inputs.cert_pwd }}
+      WIN_2016: ${{ inputs.win_2016 }}
+  
+    steps:
+      - name: Check name input length
+        run: |
+          if [ "${#CERT_NAME}" -lt 3 ]; then
+            echo "Error: Cert name input must be at least 3 characters long"
+            exit 1
+          fi
+
+      - name: Check password input length
+        run: |
+          if [ "${#CERT_PWD}" -lt 8 ]; then
+            echo "Error: Cert password input must be at least 8 characters long"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Login to Azure
+        shell: pwsh
+        run: |
+          $modules = @("Az.Accounts","Az.KeyVault")
+          foreach($module in $modules) {
+              try {
+                  Get-InstalledModule -Name $module -ErrorAction Stop | Out-Null
+              } catch {
+                  Find-Module -Name $module | Install-Module -Force
+              } finally {
+                  Import-Module $module
+              }
+          }
+          Write-Output "Testing Azure Connection..."
+          $context = Get-AzContext
+          if(!$context) {
+              $azurePassword = ConvertTo-SecureString "${{ secrets.CLIENT_SECRET }}" -AsPlainText -Force
+              $psCred = New-Object System.Management.Automation.PSCredential("${{ secrets.CLIENT_ID }}", $azurePassword)
+              Connect-AzAccount -Credential $psCred -TenantId "${{ secrets.TENANT_ID }}" -ServicePrincipal
+              } else {
+                  Write-Output "Already connected to Azure.."
+              }
+              $currSubID = (Get-AzContext).Subscription.id
+              $prodSubID = "${{ secrets.PROD_SUB_ID }}"
+              if($currSubID -notmatch $prodSubID) {
+                  try {
+                      Set-AzContext -Subscription $prodSubID | out-null
+                  } catch {
+                      throw "Could not set prod subscription"
+                  }
+              }
+
+      - name: Get Named Cert
+        shell: pwsh
+        run: |
+          $certName = $env:CERT_NAME
+          $certPwd = $env:CERT_PWD
+          $win2016 = $env:WIN_2016
+          ./scripts/get_cert.ps1 -certName $certName -certPwd $certPwd -win2016 $win2016
+
+      - name: Cert Artifact Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: cert
+          path: ./certs/downloads/*.pfx

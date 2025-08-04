@@ -1,0 +1,122 @@
+name: Certificate Expiry Check
+
+on: 
+    workflow_dispatch:
+    schedule:
+      - cron: '0 9 * * 0' # Run every Sunday at 9 AM
+
+jobs:
+  check_expiry:
+    name: Certificate Expiry
+    runs-on: ubuntu-latest
+    outputs:
+      output_check_exists: ${{ steps.check_file.outputs.check }}
+    env:
+        CSR_STORAGE_ACC_KEY: ${{ secrets.CSR_STORAGE_ACC_KEY }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        shell: pwsh
+        run: |
+          $modules = @("Az.Accounts")
+          foreach($module in $modules) {
+              try {
+                  Get-InstalledModule -Name $module -ErrorAction Stop | Out-Null
+              } catch {
+                  Find-Module -Name $module | Install-Module -Force
+              } finally {
+                  Import-Module $module
+              }
+          }
+          Write-Output "Testing Azure Connection..."
+          $context = Get-AzContext
+          if(!$context) {
+              $azurePassword = ConvertTo-SecureString "${{ secrets.CLIENT_SECRET }}" -AsPlainText -Force
+              $psCred = New-Object System.Management.Automation.PSCredential("${{ secrets.CLIENT_ID }}", $azurePassword)
+              Connect-AzAccount -Credential $psCred -TenantId "${{ secrets.TENANT_ID }}" -ServicePrincipal
+              } else {
+                  Write-Output "Already connected to Azure.."
+              }
+              $currSubID = (Get-AzContext).Subscription.id
+              $prodSubID = "${{ secrets.PROD_SUB_ID }}"
+              if($currSubID -notmatch $prodSubID) {
+                  try {
+                      Set-AzContext -Subscription $prodSubID | out-null
+                  } catch {
+                      throw "Could not set prod subscription"
+                  }
+              }
+
+      - name: Expired Cert Clean Up
+        shell: pwsh
+        run: |
+          $csrSAccKey = $env:CSR_STORAGE_ACC_KEY
+          ./scripts/expired_certs.ps1 -csrSAccKey $csrSAccKey
+
+      - name: Certificate Expiry
+        shell: pwsh
+        run: |
+          $csrSAccKey = $env:CSR_STORAGE_ACC_KEY
+          ./scripts/cert_expiry.ps1 -csrSAccKey $csrSAccKey
+
+      - name: Cert File Check
+        id: check_file
+        run: |
+          FILE=./csr/certlist.json
+          if [ -f "$FILE" ]; then
+            echo "cert list file exists"
+            echo "::set-output name=check::present"
+          fi
+
+      - name: Upload Cert List File
+        if: steps.check_file.outputs.check == 'present'
+        uses: actions/upload-artifact@v4
+        with:
+          name: certlist
+          path: ./csr/certlist.json
+      
+      - name: Upload Cert List File
+        if: steps.check_file.outputs.check == 'present'
+        uses: actions/upload-artifact@v4
+        with:
+          name: csr
+          path: ./csr/*.csr
+
+  send_email:
+    name: Send Email
+    needs: check_expiry
+    runs-on:
+      group: ghr-ubuntu-lts
+    if: needs.check_expiry.outputs.output_check_exists == 'present'
+    
+    steps:
+    - name: Download Cert List File
+      uses: actions/download-artifact@v4
+      with:
+        name: certlist
+        path: ./csr
+
+    - name: Download CSR Files
+      uses: actions/download-artifact@v4
+      with:
+        name: csr
+        path: ./csr
+
+    - name: Send Email
+      shell: pwsh
+      run: |
+        $Recipients = @("jira@deliniancentral.atlassian.net","grp_it_devops@euromoneyplc.com")
+        $from = "github-noreply@euromoneyplc.com"
+        $smtp = "smtp.emazure.internal"
+        $expiredCerts = Get-Content -Path ./csr/certlist.json | ConvertFrom-Json
+        foreach($cert in $expiredCerts) {
+            $certName = $cert.Cert_Name
+            Get-Content -Path "./csr/$certName.csr" | Out-File -FilePath "./csr/$certName.txt"
+            $subject = "$certName Expiry Alert"
+            $body = "The certificate $certName is expiring on $($cert.End_Date). Please renew it."
+            $attachment = "./csr/$certName.txt"
+            Send-MailMessage -From $from -To $Recipients  -Subject $subject -Body $body -SmtpServer $smtp -BodyAsHtml -Attachments $attachment
+        }

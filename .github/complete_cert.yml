@@ -1,0 +1,92 @@
+name: Complete Cert
+on: workflow_dispatch
+
+jobs:
+  complete_cert:
+    runs-on:
+      group: ghr-ubuntu-lts
+    env:
+      CSR_STORAGE_ACC_KEY: ${{ secrets.CSR_STORAGE_ACC_KEY }}
+      CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Login to Azure
+        shell: pwsh
+        run: |
+          $modules = @("Az.Accounts")
+          foreach($module in $modules) {
+              try {
+                  Get-InstalledModule -Name $module -ErrorAction Stop | Out-Null
+              } catch {
+                  Find-Module -Name $module | Install-Module -Force
+              } finally {
+                  Import-Module $module
+              }
+          }
+          Write-Output "Testing Azure Connection..."
+          $context = Get-AzContext
+          if(!$context) {
+              $azurePassword = ConvertTo-SecureString "${{ secrets.CLIENT_SECRET }}" -AsPlainText -Force
+              $psCred = New-Object System.Management.Automation.PSCredential("${{ secrets.CLIENT_ID }}", $azurePassword)
+              Connect-AzAccount -Credential $psCred -TenantId "${{ secrets.TENANT_ID }}" -ServicePrincipal
+              } else {
+                  Write-Output "Already connected to Azure.."
+              }
+              $currSubID = (Get-AzContext).Subscription.id
+              $prodSubID = "${{ secrets.PROD_SUB_ID }}"
+              if($currSubID -notmatch $prodSubID) {
+                  try {
+                      Set-AzContext -Subscription $prodSubID | out-null
+                  } catch {
+                      throw "Could not set prod subscription"
+                  }
+              }
+
+      - name: Complete Certificate
+        shell: pwsh
+        run: |
+          $csrSAccKey = $env:CSR_STORAGE_ACC_KEY
+          $certPW = $env:CERT_PASSWORD
+          ./scripts/complete_cert.ps1 -csrSAccKey $csrSAccKey -certPW $certPW
+
+      - name: Key Vault Cert List
+        shell: pwsh
+        run: |
+          $keyvaultName = "delinian-certificates"
+          $cert_list = @()
+          
+          $certificates = Get-AzKeyVaultCertificate -VaultName $keyvaultName
+          foreach($cert in $certificates) {
+            $cert_list += [pscustomobject]@{
+              Name  = $cert.Name
+              Expires = $cert.Expires
+            }
+          }
+          
+          # Calculate the maximum length of the certificate names
+          $maxNameLength = ($cert_list | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+          $maxNameLength = [Math]::Max($maxNameLength, 4)  # Ensure minimum length for "Name"
+
+          # Create the markdown table header with dynamic column width
+          $nameHeader = "Name".PadRight($maxNameLength)
+          $cert_list_string = "$nameHeader Expires`n`n"
+          
+          foreach ($cert in $cert_list) {
+            $name = $cert.Name.PadRight($maxNameLength)
+            $cert_list_string += "$name $($cert.Expires)`n"
+          }
+          
+          $content = Get-Content -Path "./scripts/readme_template.md" -Raw
+          $content = $content -replace "{{ << CERT_LIST >> }}", $cert_list_string
+          $content = Set-Content -Path "./README.md" -Value $content
+
+      - name: Update README.md
+        run: |
+          sed -i 's/<reponame>/'${{ github.event.repository.name }}'/' README.md
+          git config user.email "actions@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git commit -am "Automated readme update" || :
+          git push || :

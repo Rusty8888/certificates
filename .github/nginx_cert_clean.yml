@@ -1,0 +1,131 @@
+name: Clean Nginx
+on:
+  workflow_dispatch:
+    inputs:
+      envir:
+        description: 'Which environment is this being run against?'
+        default: uat
+        required: true
+        type: choice
+        options:
+        - uat
+        - prod
+
+env:
+  envir: ${{ inputs.envir }}
+
+jobs:
+  nginx_cleardown:
+    runs-on:
+      group: ghr-ubuntu-lts
+    env:
+      EMADMIN_PASSWORD: ${{ secrets.EMADMIN_PASSWORD }}
+        
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    
+    - name: Install ansible and Dependencies
+      run: |
+        python -m venv env
+        source env/bin/activate
+        sudo pip install ansible==9.6.0
+  
+    - name: Collect Hosts
+      run: |
+        source env/bin/activate
+        pwsh -command "(& ansible-inventory --list | convertfrom-json).$envir.hosts" > nHosts.txt
+        cat nHosts.txt
+
+    - name: Clean Previous Run
+      run : |
+        while read nh; do
+          CRT_FILE=/tmp/crt-$nh.txt
+          CONF_FILE=/tmp/clean-$nh.txt
+          if [ -f "$CRT_FILE" ]; then
+            rm $CRT_FILE
+          fi
+          if [ -f "$CONF_FILE" ]; then
+            rm $CONF_FILE
+          fi
+        done < nHosts.txt
+
+    - name: Ansible Cleardown
+      run: |
+        source env/bin/activate
+        ansible-playbook ansible/nginx_clean.yml --extra-vars "ansible_password=$EMADMIN_PASSWORD" --extra-vars "envir=$envir"
+
+    - name: Check cert file exists
+      id: crt_exists
+      run: |
+        while read nh; do
+          FILE=/tmp/crt-$nh.txt
+          if [ -f "$FILE" ]; then
+            echo "$nh cert file exists"
+            echo "crt_exists=present" >> $GITHUB_OUTPUT
+          fi
+        done < nHosts.txt
+
+    - name: Certs Deleted
+      if: steps.crt_exists.outputs.crt_exists == 'present'
+      run: |
+        touch certs_deleted.txt
+        while read nh; do
+          echo $nh >> certs_deleted.txt
+          FILE=/tmp/crt-$nh.txt
+          if [ -f "$FILE" ]
+          then
+            sed -i '/^$/d' $FILE
+            cat $FILE >> certs_deleted.txt
+          fi
+        done < nHosts.txt
+        cat certs_deleted.txt
+    
+    - name: Check config file exists
+      id: config_exists
+      run: |
+        while read nh; do
+          FILE=/tmp/clean-$nh.txt
+          if [ -f "$FILE" ]; then
+            echo "$nh config file exists"
+            echo "config_exists=present" >> $GITHUB_OUTPUT
+          fi
+        done < nHosts.txt
+    
+    - name: Configs to Check
+      if: steps.config_exists.outputs.config_exists == 'present'
+      id: config_check
+      run: |
+        touch conf_email.txt
+        while read nh; do
+          echo $nh >> conf_email.txt
+          FILE=/tmp/clean-$nh.txt
+          if [ -f "$FILE" ]
+          then
+            sed -i '/^$/d' $FILE
+            cat $FILE >> conf_email.txt
+            echo "check=present" >> $GITHUB_OUTPUT
+          fi
+        done < nHosts.txt
+        cat conf_email.txt
+
+    - name: Raise Jira Ticket
+      if: steps.config_check.outputs.check == 'present'
+      shell: pwsh
+      run: |
+        [string]$body = Get-Content conf_email.txt -raw
+        $to = "devops.bau@delinian.com"
+        $from = "noreply@github.com"
+        $subject = "Nginx config check - Cert expired"
+        $smtp = "smtp.emazure.internal"
+        Send-MailMessage -From $from -To $to -Subject $subject -Body $body -SmtpServer $smtp
+    
+    - name: Confirm clean
+      if: steps.crt_exists.outputs.crt_exists != 'present' && steps.config_exists.outputs.config_exists != 'present'
+      run: |
+        echo "There are no certs out of date"
+        echo "There are no configs to check"

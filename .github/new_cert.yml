@@ -1,0 +1,74 @@
+name: New Certificate
+# This is to order a brand new certificate - not to renew those already in key vault
+# The san input entry is only needed for a new or modified SAN cert
+#   - Enter all the SAN entries as comman separated values
+#   - leave blank for a standard wildcard or individual cert
+on:
+  workflow_dispatch:
+    inputs:
+      cert_name:
+        description: 'New Certificate Name'
+        required: true
+        type: string
+      sans:
+        description: 'Subject Alternative Names (for SAN certs)'
+        required: false
+        type: string
+
+env:
+  cert_name: ${{ inputs.cert_name }}
+  sans: ${{ inputs.sans }}
+
+jobs:
+  raise_csr:
+    name: Raise CSR
+    runs-on: ubuntu-latest
+    env:
+        CSR_STORAGE_ACC_KEY: ${{ secrets.CSR_STORAGE_ACC_KEY }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create CSR
+        shell: pwsh
+        run: |
+          $csrSAccKey = $env:CSR_STORAGE_ACC_KEY
+          $certName = $env:cert_name
+          $sans = $env:sans
+          ./scripts/new_cert.ps1 -csrSAccKey $csrSAccKey -certName $certName -SANs $sans
+
+      - name: Upload CSR
+        uses: actions/upload-artifact@v4
+        with:
+          name: csr
+          path: ./csr/*.csr
+
+  send_email:
+    name: Send Email
+    needs: raise_csr
+    runs-on:
+      group: ghr-ubuntu-lts
+    
+    steps:
+    - name: Download CSR Files
+      uses: actions/download-artifact@v4
+      with:
+        name: csr
+        path: ./csr
+
+    - name: Send Email
+      shell: pwsh
+      run: |
+        $Recipients = @("grp_it_devops@euromoneyplc.com")
+        $from = "noreply@github.com"
+        $smtp = "smtp.emazure.internal"
+        $CSRs = Get-ChildItem -Path ./csr -Filter *.csr
+        foreach($csr in $CSRs) {
+            $cert_name = $csr.name -replace ".csr",""
+            Get-Content -Path "./csr/$cert_name.csr" | Out-File -FilePath "./csr/$cert_name.txt"
+            $subject = "CSR for $cert_name"
+            $body = "Please find attached the CSR in txt format for $cert_name"
+            $attachment = "./csr/$cert_name.txt"
+            Send-MailMessage -From $from -To $Recipients  -Subject $subject -Body $body -SmtpServer $smtp -BodyAsHtml -Attachments $attachment
+        }

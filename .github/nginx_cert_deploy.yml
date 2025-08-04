@@ -1,0 +1,194 @@
+name: Nginx Cert Upload
+on:
+  workflow_dispatch:
+    inputs:
+      envir:
+        description: 'Which environment is this being run against?'
+        default: uat
+        required: true
+        type: choice
+        options:
+        - uat
+        - prod
+
+env:
+  envir: ${{ inputs.envir }}
+
+jobs:
+  ## WORKFLOW
+    # JOB: RAISE CHANGE
+      # RAISE CHANGE
+  ## WORKFLOW
+    # JOB: CLOSE CHANGE
+      # CLOSE CHANGE ON SUCCESS
+  check_cert:
+    name: Nginx Cert Collection
+    runs-on:
+        group: ghr-ubuntu-lts
+    env:
+      EMADMIN_PASSWORD: ${{ secrets.EMADMIN_PASSWORD }}
+      envir: ${{ inputs.envir }}
+
+    # Gets all the certs in Nginx and sees if a newer one exists in Azure keyvault
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install ansible and Dependencies
+        run: |
+          python -m venv env
+          source env/bin/activate
+          sudo pip install ansible==9.6.0
+
+      - name: Collect Hosts
+        run: |
+          source env/bin/activate
+          pwsh -command "(& ansible-inventory --list | convertfrom-json).$envir.hosts" > nHosts.txt
+          cat nHosts.txt
+
+      - name: Clean Previous Run
+        shell: pwsh
+        run : |
+          $path = "./certs/downloads"
+          if(Test-Path $path) {
+            Remove-Item $path -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $path
+      
+      - name: Nginx Ansible Cert Collection
+        run: |
+          source env/bin/activate
+          ansible-playbook ./ansible/nginx_collect.yml --extra-vars "ansible_password=$EMADMIN_PASSWORD" --extra-vars "envir=$envir"
+
+      - name: Combine config file check
+        shell: pwsh
+        run : |
+          $path = "./certs/downloads/*.json"
+          if (Test-Path $path) {
+            $files = Get-ChildItem -Path ./certs/downloads -Filter *.json
+            for ($i = 0; $i -lt $files.Count; $i++) {
+              for ($j = $i + 1; $j -lt $files.Count; $j++) {
+                  $file1Content = Get-Content $files[$i].FullName -Raw
+                  $file2Content = Get-Content $files[$j].FullName -Raw
+                  $differences = Compare-Object -ReferenceObject $file1Content -DifferenceObject $file2Content
+                  if ($differences) {
+                      throw "Differences found between Nginx servers:"
+                      $differences
+                  } else {
+                      Remove-Item $files[$j].FullName -Force
+                      $newName = "config_certs.json"
+                      Rename-Item $files[$i].FullName -NewName $newName
+                      break 2 # Exit both loops since files are processed
+                  }
+              }
+          }
+          } else {
+              throw "No JSON files found in the directory."
+          }
+          
+      - name: Upload Config List Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: configlist
+          path: ./certs/downloads/config_certs.json
+  
+  ready_cert:
+    name: Check/Prep Cert for Nginx
+    needs: check_cert
+    runs-on:
+        group: ghr-ubuntu-lts
+    env:
+      CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+      EMADMIN_PASSWORD: ${{ secrets.EMADMIN_PASSWORD }}
+      envir: ${{ inputs.envir }}
+    outputs:
+      output_ok_exists: ${{ steps.ok_exists.outputs.ok_file }}
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Config List Files
+        uses: actions/download-artifact@v4
+        with:
+          name: configlist
+          path: ./certs/downloads
+
+      # Need to log in to Azure for ps1 file that splits the cert below
+      - name: Log in to Azure
+        shell: pwsh
+        run: |
+          $modules = @("Az.Accounts")
+          foreach($module in $modules) {
+              try {
+                  Get-InstalledModule -Name $module -ErrorAction Stop | Out-Null
+              } catch {
+                  Find-Module -Name $module | Install-Module -Force
+              } finally {
+                  Import-Module $module
+              }
+          }
+          Write-Output "Testing Azure Connection..."
+          $context = Get-AzContext
+          if(!$context) {
+              $azurePassword = ConvertTo-SecureString "${{ secrets.CLIENT_SECRET }}" -AsPlainText -Force
+              $psCred = New-Object System.Management.Automation.PSCredential("${{ secrets.CLIENT_ID }}", $azurePassword)
+              Connect-AzAccount -Credential $psCred -TenantId "${{ secrets.TENANT_ID }}" -ServicePrincipal
+              } else {
+                  Write-Output "Already connected to Azure.."
+              }
+              $currSubID = (Get-AzContext).Subscription.id
+              $prodSubID = "${{ secrets.PROD_SUB_ID }}"
+              if($currSubID -notmatch $prodSubID) {
+                  try {
+                      Set-AzContext -Subscription $prodSubID | out-null
+                  } catch {
+                      throw "Could not set prod subscription"
+                  }
+              }
+      
+      # This step splits the pfx cert into key and crt files that are accepted by Nginx
+      # It also copies the crt and key files to emadmin home ready for distribution by Ansible
+      - name: Nginx Cert Creation
+        shell: pwsh
+        run: |
+          ./scripts/nginx_cert.ps1
+      
+      - name: Check OK File Exists
+        id: ok_exists
+        run: |
+          FILE=/certs/downloads/cert_ok.txt
+          if [ -f "$FILE" ]; then
+            echo "ok file exists"
+            echo "ok_file=present" >> $GITHUB_OUTPUT
+          fi
+
+  install_cert:
+    name: Install Cert on Nginx
+    needs: ready_cert
+    if: needs.ready_cert.outputs.output_ok_exists == 'present'
+    runs-on:
+      group: ghr-ubuntu-lts
+    env:
+      EMADMIN_PASSWORD: ${{ secrets.EMADMIN_PASSWORD }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+    
+      - name: Install ansible and Dependencies
+        run: |
+          python -m venv env
+          source env/bin/activate
+          sudo pip install ansible==9.6.0
+
+      - name: Nginx Ansible Cert Install
+        run: |
+          source env/bin/activate
+          ansible-playbook ./ansible/nginx_deploy.yml --extra-vars "ansible_password=$EMADMIN_PASSWORD" --extra-vars "envir=$envir"
